@@ -1,55 +1,6 @@
 // NitroWorks ECU - DualCore sprint - STEP 4: mutex-protected RobotState + snapshot
 //                                            (pairing state machine core 0 / OLED core 1 unchanged)
-//
-// Step 3 made both cores do their real job (pairing state machine on core 0,
-// OLED + RING-command emit on core 1) but shared the result as a handful of
-// loose `volatile` scalars, no lock - deliberately naive. Each individual field
-// was already safe (native-width scalar, one writer core, one reader core - the
-// ESP32 doesn't tear those), but nothing stopped uiTask from combining fields
-// read a few instructions apart into one inconsistent frame: it could read
-// `linkState` from one btTask iteration and `connectedAtMs` from the next.
-//
-// Step 4 closes that gap without changing behaviour:
-//
-//   core 0 / btTask  - unchanged pairing state machine, but now writes into a
-//     core-0-only `RobotState g_pending` as it goes (no lock needed - only
-//     btTask ever touches it), then does ONE spinlock-protected struct copy
-//     (`publishState()`) into the shared `g_state` at the tail of each loop
-//     iteration. One critical section per iteration, not one per field.
-//
-//   core 1 / uiTask  - takes ONE spinlock-protected copy (`readState()`) at the
-//     top of each frame into a local `RobotState snap`, then renders the whole
-//     frame off `snap`. Every field in that frame is guaranteed to come from
-//     the same btTask iteration.
-//
-// The lock is a `portMUX_TYPE` spinlock (`portENTER_CRITICAL` /
-// `portEXIT_CRITICAL`), not a FreeRTOS semaphore/mutex - the protected section
-// is just a fixed-size struct copy (a handful of scalars), so a spinlock avoids
-// the scheduler overhead of a semaphore for something that fast, and ESP-IDF's
-// portMUX_TYPE is specifically the primitive for a short, code-only critical
-// section shared between the two cores.
-//
-//     Test rig for step 4 is OLED + the two buttons only - no ring, no TCU. The
-//     `RING …` / `BUZZ …` bytes still go out UART1 TX (GPIO17) and are mirrored
-//     to USB as `tx>`, but nothing receives them; RX bytes print as `rx<`
-//     (jumper GPIO17->GPIO16 for a loopback check). That path is code, not
-//     something this step verifies.
-//
-// powerState / S0 Battery Critical / the warning strip are NOT in this step -
-// battery sensing is the BMS's (ECU-SPEC-001 rev 5) and the simulated
-// powerState input lands in step 5. The status strip renders its `normal` state
-// only; BATT_PCT_STUB stands in for a state-of-charge the ECU never actually
-// receives.
-//
-// Verify (see docs/STEPS.md) - OLED + buttons only, behaviour identical to step 3:
-//   1. boot bonded -> S1 Search (glyph + waves animating), ui on core 1
-//   2. Pair button -> ~600 ms header-only blank -> S2 Pair, Mode LED off
-//   3. controller connects -> S3 Connected (~1.5 s) -> S4 stick-check HUD;
-//      wiggle a stick -> ACC / REV / TURN, ~400 ms linger back to the Idle glyph
-//   4. disconnect -> back to S1 Search; bt heartbeat uninterrupted
-//   5. Reset button -> S5 toast (~1 s) -> S2 Pair; NVS bond cleared
-//   6. btTask / uiTask stack high-water recorded, both with headroom
-//   7. lock overhead: bt poll (~5 ms) / ui frame (~166 ms) cadence unaffected
+
 
 #include <Arduino.h>
 #include <string.h>
@@ -59,9 +10,6 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_SH110X.h>
 
-// Set to 1 to make uiTask burn 3 s of core 1 every ~10 frames - btTask's
-// BP32.update() must stay responsive through it. Ship at 0.
-#define ISOLATION_TEST 1
 
 // ---- pins --------------------------------------------------------------------
 // Buttons keep the BluetoothPairing test-rig wiring (active-low, internal
@@ -391,17 +339,6 @@ void btTask(void*) {
       beats++;
     }
 
-#if ISOLATION_TEST
-    static bool spun = false;
-    if (!spun && beats >= 7) {
-      spun = true;
-      Serial.println("bt  >>> busy-spinning 3 s (uiTask must keep rendering) <<<");
-      uint32_t t0 = millis();
-      while (millis() - t0 < 3000) { /* hog core 0 */ }
-      Serial.println("bt  <<< spin done");
-    }
-#endif
-
     vTaskDelay(pdMS_TO_TICKS(BT_POLL_MS));
   }
 }
@@ -690,14 +627,7 @@ void uiTask(void*) {
 
     if ((frames % 30) == 29) logStack("ui ");
 
-#if ISOLATION_TEST
-    if ((frames % 60) == 30) {
-      Serial.println("ui  >>> busy-spinning 3 s (btTask must keep polling) <<<");
-      uint32_t t0 = millis();
-      while (millis() - t0 < 3000) { /* hog core 1 */ }
-      Serial.println("ui  <<< spin done");
-    }
-#endif
+
 
     frames++;
     vTaskDelay(pdMS_TO_TICKS(UI_FRAME_MS));
