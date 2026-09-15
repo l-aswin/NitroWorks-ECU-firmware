@@ -1,75 +1,42 @@
-// NitroWorks ECU - OLED pairing-screen mockup browser
-//
-// Renders each pairing OLED screen from ECU-SPEC-002-oled-screens.md (rev 3) as a
-// self-contained animated mockup. One button on GPIO15 steps through them.
-// Boots on mockup 1 (S1 Search). All screens are GFX primitives + the built-in
-// 5x7 font at setTextSize(1)/(2), plus (3) for the S1/S2 word and S0's "LOW".
-// No stored bitmaps. Panel: 1.3" SH1106, 128x64, driven by Adafruit_SH1106G
-// (not SSD1306). The SH1106 has a 132px internal map / 2px offset, so every
-// layout keeps a 2px edge margin.
-//
-// S0 Battery Critical is a global, preemptive firmware state (powerState ==
-// CRITICAL): it also cuts drive, tears down Bluetooth, and turns the LED ring
-// off, with the buzzer double-chirping. None of that is modelled here - this is
-// a screen browser, so S0 is just one more entry in the list.
-//
-// S4 is the post-connect stick check: one axis at a time (idle glyph, then
-// ACC / REV / TURN L / TURN R once you push the stick). With no real joystick
-// here, mockup 6 cycles those states on a ~1.6 s timer. The idle glyph is the
-// gamepad silhouette adopted in ECU-SPEC-002 rev 3 (S4_IDLE_GLYPH 1);
-// S4_IDLE_GLYPH 2 keeps the rejected "knob + 4 arrows" alternative for reference.
-
 #include <Arduino.h>
-#include <Wire.h>
-#include <math.h>
-#include <string.h>
-#include <stdio.h>
-#include <Adafruit_GFX.h>
-#include <Adafruit_SH110X.h>
+#include <Preferences.h>
+#include<Bluepad32.h>
 
-#define SCREEN_WIDTH 128
-#define SCREEN_HEIGHT 64
-#define OLED_ADDR 0x3C  // some 1.3" modules use 0x3D
-#define W SH110X_WHITE
+constexpr int PIN_MODE_LED = 2;        // status LED: 3 states (see loop())
+constexpr int PIN_COMMS_LED = 4;  // comms LED: flashes when controller input changes
+constexpr int PIN_PAIR_BTN = 15;  // Pair button, active-low with internal pull-up
+constexpr int PIN_RESET_BTN = 13;  // Reset button (resets the controller bond), active-low with internal pull-up
 
-// S4 idle glyph.
-//   1 = gamepad silhouette  (ECU-SPEC-002 rev 3 - the adopted design)
-//   2 = centre knob + 4 arrows  (rejected alternative, kept for reference)
-#define S4_IDLE_GLYPH 1
+constexpr uint32_t COMMS_BLINK_MS = 30;  // comms LED on-time per input change
+constexpr int32_t STICK_DEADZONE = 24;   // ignore idle axis jitter / rest offsets
 
-constexpr int PIN_NAV_BTN = 15;          // nav button: GPIO15 -> button -> GND
+// Pressing Pair enters Pairing mode: the active controller is disconnected and
+// the ECU accepts one new controller. Pairing mode stays open until a controller
+// connects (no timeout). A fresh (unbonded) unit boots straight into Pairing mode.
 constexpr uint32_t BTN_DEBOUNCE_MS = 40;
-constexpr uint32_t FRAME_MS = 160;       // ~6 Hz refresh, per the spec
 
-Adafruit_SH1106G display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
+// NVS: which controller (if any) this car is bonded to. Bluepad32 4.1.0 exposes
+// no bond-list query, so we track it ourselves. ECU-SPEC-001 §8.
+constexpr char NVS_NS[] = "nitro-ecu";
+constexpr char NVS_KEY_BONDED[] = "bonded";
 
-// ---- battery status strip states --------------------------------------------
-// Only two: normal and warning. Critical is NOT a strip state - it takes the
-// whole screen (S0), see renderBatteryCritical().
-enum BattState { BATT_NORMAL, BATT_WARNING };
+ControllerPtr controllers[BP32_MAX_GAMEPADS];
 
-// ---- mockup list -----------------------------------------------------------
-const char* const MOCKUP_NAMES[] = {
-  "1  S1  Search state - OLED word 'SCAN' (82%)",
-  "2  S1b Search - low battery warning (~15%)",
-  "3  S2  Pair (69%)",
-  "4  S2b Pair - low battery warning (~15%)",
-  "5  S3  Connected (READY)",
-  "6  S4  Stick check (cycles idle / ACC / REV / TURN L / TURN R)",
-  "7  S0  Battery Critical (global lockout)",
-};
-constexpr int NUM_MOCKUPS = sizeof(MOCKUP_NAMES) / sizeof(MOCKUP_NAMES[0]);
+Preferences prefs;
+bool hasBondedController = false;      // mirror of the NVS flag, loaded in setup()
+bool pairingMode = false;             // true = Pairing mode (fast blink)
+uint32_t commsBlinkOffAt = 0;        // 0 = comms LED idle
 
-int screen = 0;  // current mockup index, 0-based (boots on mockup 1)
-
-// ---- debounced active-low button ------------------------------------------
+// Debounced active-low button (button shorts the pin to GND; internal pull-up).
 struct Button {
   int pin;
-  int stable;
+  int stable;                        // debounced level (HIGH = released)
   int lastReading;
   uint32_t lastChangeMs;
 };
-Button navBtn = {PIN_NAV_BTN, HIGH, HIGH, 0};
+
+Button pairBtn = {PIN_PAIR_BTN, HIGH, HIGH, 0};
+Button resetBtn = {PIN_RESET_BTN, HIGH, HIGH, 0};
 
 void initButton(Button& b) {
   pinMode(b.pin, INPUT_PULLUP);
@@ -91,225 +58,225 @@ bool buttonPressed(Button& b) {
   return false;
 }
 
-// ---- shared animation clocks (time-based, per the "Draw calls" appendix) ---
-int animWaves() { return (millis() / 300) % 4; }        // searching arcs: 0,1,2,3 -> none/w1/+w2/+w3, repeat
-bool animBlink() { return (millis() / 480) % 2 == 0; }  // "toggle every 3 frames"
-
-// ---- draw helpers --------------------------------------------------------
-
-// The Bluetooth glyph: 5 drawLine segments (stem, two shoulders, two crossing
-// diagonals), centred at (cx,cy) with half-height h and half-width wd. Drawn
-// twice at a 1px offset when bold (S3 variant); optional filled "connected" dot.
-void drawBtGlyph(int cx, int cy, int h, int wd, bool bold, bool dot) {
-  for (int o = 0; o < (bold ? 2 : 1); o++) {
-    int d = o;  // 1px x-offset on the bold pass
-    display.drawLine(cx + d, cy - h, cx + d, cy + h, W);            // stem
-    display.drawLine(cx + d, cy - h, cx + wd + d, cy - h / 2, W);   // upper shoulder
-    display.drawLine(cx + d, cy + h, cx + wd + d, cy + h / 2, W);   // lower shoulder
-    display.drawLine(cx + wd + d, cy - h / 2, cx - wd + d, cy + h / 2, W);  // diagonal
-    display.drawLine(cx + wd + d, cy + h / 2, cx - wd + d, cy - h / 2, W);  // diagonal
-  }
-  if (dot) display.fillCircle(cx, cy, 2, W);
+bool pairingWindowOpen() {
+  return pairingMode;
 }
 
-// Right-opening "searching" arcs at r = step / 2*step / 3*step about a centre
-// just right of the glyph. n arcs drawn; double-drawn (r and r+1) when solid (S3).
-void drawWaves(int cx, int cy, int n, bool solid, int step) {
-  for (int i = 1; i <= 3 && i <= n; i++) {
-    int r = i * step;
-    display.drawCircleHelper(cx, cy, r, 0x6, W);  // 0x6 = right half
-    if (solid) display.drawCircleHelper(cx, cy, r + 1, 0x6, W);
-  }
+void persistBonded(bool v) {
+  size_t n = prefs.putBool(NVS_KEY_BONDED, v);
+  hasBondedController = v;
+  Serial.printf("persistBonded(%d) -> %u bytes written\n", v, (unsigned)n);
 }
 
-// One shared status-strip routine for S1 / S2 / S4. Ends by drawing the
-// full-width divider at y = 20 (2px edge margin -> x 2..125).
-void drawStatusStrip(BattState state, int pct, bool hudBtIcon) {
-  display.setTextSize(2);
-  if (state == BATT_NORMAL) {
-    display.drawRect(2, 4, 32, 14, W);            // battery body
-    display.fillRect(34, 8, 3, 6, W);             // nub
-    int fw = (int)((pct / 100.0f) * 28);
-    display.fillRect(4, 6, fw, 10, W);            // proportional charge
-    display.setCursor(44, 3);
-    display.print(pct);
-    display.print("%");
-  } else {  // BATT_WARNING
-    display.drawRect(2, 3, 40, 16, W);            // bigger empty outline (solid)
-    display.fillRect(42, 8, 3, 6, W);             // nub
-    if (animBlink()) {                            // exclamation, centred in the outline
-      display.fillRect(20, 6, 3, 6, W);           //   stem  (interior centre ~x21.5 / y10.5)
-      display.fillRect(20, 14, 3, 2, W);          //   dot   (2px margin top & bottom)
+bool anyControllerConnected() {
+  for (int i = 0; i < BP32_MAX_GAMEPADS; i++) {
+    if (controllers[i] && controllers[i]->isConnected()) return true;
+  }
+  return false;
+}
+
+void openPairingWindow() {
+  // Disconnect the active controller and delete the stored key, then open up for
+  // one new controller. forgetBluetoothKeys() is all-or-nothing, so it has to
+  // happen here while the old key is the only one - deleting it later would wipe
+  // the new controller's key too. hasBondedController is left as-is: it's only
+  // cleared once a new controller actually bonds (see onConnectedController), so
+  // an abandoned attempt still boots back into normal mode.
+  for (int i = 0; i < BP32_MAX_GAMEPADS; i++) {
+    if (controllers[i]) {
+      controllers[i]->disconnect();
+      controllers[i] = nullptr;
     }
-    display.setCursor(48, 3);
-    display.print("15%");                         // constant
   }
-
-  if (hudBtIcon) drawBtGlyph(115, 10, 9, 6, true, true);  // connected icon (glyph + dot), right edge
-
-  display.drawLine(2, 20, 125, 20, W);           // divider
+  digitalWrite(PIN_MODE_LED, LOW);
+  BP32.forgetBluetoothKeys();
+  BP32.enableNewBluetoothConnections(true);
+  pairingMode = true;
+  Serial.println("Pairing mode - disconnected the active controller. Put the new "
+                 "controller in pairing mode (Blitz: hold Power + A).");
 }
 
-// State word: static, size 3, centred in the gap between the left screen edge and
-// the Bluetooth glyph (which starts at x~80), vertically centred in Area 2.
-// No trailing dots - the searching waves carry the motion.
-// ("SCAN" / "PAIR" are 4 chars -> 69 px wide at size 3; cursor x6 -> ends x75.)
-void drawWord(const char* word) {
-  display.setTextSize(3);
-  display.setCursor(6, 31);
-  display.print(word);
+void closePairingWindow(const char* why) {
+  BP32.enableNewBluetoothConnections(false);
+  pairingMode = false;
+  Serial.printf("Pairing mode ended: %s\n", why);
 }
 
-// ---- individual screens -------------------------------------------------
-
-// S1 / S1b / S2 / S2b share this: only word + strip state + pct differ
-// (ECU-SPEC-002 describes S1 and S2 as the same screen).
-void renderSearchLike(const char* word, BattState batt, int pct) {
-  drawStatusStrip(batt, pct, false);
-  drawWord(word);                                  // static, size 3, x6
-  drawBtGlyph(97, 41, 17, 8, false, false);        // pushed right (leftmost ~x89) -> ~15px gap
-                                                   //   after the word, r 5/10/15 waves reach ~x123
-  drawWaves(108, 41, animWaves(), false, 5);       //   (~2px inside the x125 safety margin)
+// Reset: clear the stored bond and drop straight into pairing mode, ready to
+// bond a new controller. The NVS write happens FIRST, before any BP32 call, so
+// the flag is durably cleared even if forgetBluetoothKeys() blocks or resets the
+// stack partway through.
+void resetBondedController() {
+  Serial.println("Reset button - clearing stored bond");
+  persistBonded(false);
+  openPairingWindow();  // disconnects, BP32.forgetBluetoothKeys(), pairing mode on
 }
 
-// S3 Connected: READY + the "connected" counterpart of the searching mark.
-// Glyph + waves are the same size as S1 / S2 (half-h 17, r 5/10/15); bold, all
-// three waves solid, a dot centred on the glyph.
-void renderConnected() {
-  display.setTextSize(2);
-  display.setCursor(34, 6);
-  display.print("READY");
-  drawBtGlyph(55, 40, 17, 8, true, true);         // dot centred at (55,40)
-  drawWaves(66, 40, 3, true, 5);
-}
-
-// small solid triangle, w wide / h tall, apex at the right (pointRight) or left.
-void fillTri(int x, int y, int w, int h, bool pointRight) {
-  for (int i = 0; i < w; i++) {
-    int t  = pointRight ? (w - 1 - i) : i;          // tall end
-    int hh = 1 + (h - 1) * t / (w - 1);
-    display.drawFastVLine(x + i, y + (h - hh) / 2, hh, W);
+void pollButtons() {
+  if (buttonPressed(pairBtn)) {
+    Serial.println("Pair button pressed");
+    openPairingWindow();   // a press during an open window just restarts it
+  }
+  if (buttonPressed(resetBtn)) {
+    resetBondedController();
   }
 }
 
-// S4 Stick-check HUD: one axis at a time. No real joystick here, so this cycles
-// idle -> ACC -> REV -> TURN R -> TURN L (~1.6 s each); the active bar breathes
-// from a synthetic sine so the fill motion reads. Idle glyph is selected by
-// S4_IDLE_GLYPH (1 = adopted gamepad silhouette, 2 = rejected knob + 4 arrows).
-void renderStickCheck() {
-  drawStatusStrip(BATT_NORMAL, 82, true);
-
-  int   st = (int)((millis() / 1600) % 5);          // 0 idle 1 ACC 2 REV 3 TURN R 4 TURN L
-  float m  = sinf(millis() / 500.0f) * 0.5f + 0.5f; // synthetic magnitude 0..1
-
-  if (st == 0) {                                    // idle glyph (see S4_IDLE_GLYPH)
-#if S4_IDLE_GLYPH == 1
-    display.drawRoundRect(40, 32, 48, 20, 8, W);            // gamepad body
-    display.fillRect(48, 37, 4, 10, W);                     // d-pad "+", left-justified,
-    display.fillRect(45, 40, 10, 4, W);                     //   centred on the body midline
-    display.fillCircle(80, 38, 2, W);                       // face buttons (vertical pair)
-    display.fillCircle(80, 46, 2, W);
-#else
-    display.fillCircle(64, 40, 3, W);                       // centre knob
-    display.fillTriangle(64, 25, 57, 32, 71, 32, W);        // up
-    display.fillTriangle(64, 55, 57, 48, 71, 48, W);        // down
-    display.fillTriangle(46, 40, 53, 33, 53, 47, W);        // left
-    display.fillTriangle(82, 40, 75, 33, 75, 47, W);        // right
-#endif
+void onConnectedController(ControllerPtr ctl) {
+  bool bondedBefore = hasBondedController;
+  bool foundSlot = false;
+  int slot = -1;
+  for (int i = 0; i < BP32_MAX_GAMEPADS; i++) {
+    if (controllers[i] == nullptr) {
+      controllers[i] = ctl;
+      slot = i;
+      foundSlot = true;
+      break;
+    }
+  }
+  if (!foundSlot) {
+    Serial.println("Controller connected but no empty slot");
     return;
   }
 
-  const int BX = 4, BY = 40, BW = 120, BH = 16;
-  const char* label = (st == 1) ? "ACC" : (st == 2) ? "REV"
-                    : (st == 3) ? "TURN R" : "TURN L";
+  // Guard against the known Bluepad32 caveat where enableNewBluetoothConnections(false)
+  // does not always reject unbonded controllers on the BT-Classic path: a connect
+  // with no bond and no open pairing window should be impossible - drop it.
+  if (!bondedBefore && !pairingWindowOpen()) {
+    Serial.println("Rejecting unexpected controller (no bond, not pairing)");
+    controllers[slot] = nullptr;
+    ctl->disconnect();
+    return;
+  }
 
-  display.setTextSize(2);
-  display.setCursor(4, 23);
-  display.print(label);
-  if (st == 1) fillTri(4 + (int)strlen(label) * 12 + 2, 25, 7, 9, true);
-  if (st == 2) fillTri(4 + (int)strlen(label) * 12 + 2, 25, 7, 9, false);
+  Serial.printf("Controller connected, slot %d\n", slot);
+  if (pairingWindowOpen()) {
+    // This is the new controller the player is switching to. openPairingWindow()
+    // already dropped the old one; clear any other slot defensively (e.g. a stale
+    // reconnect that slipped in during the window) so only this one remains.
+    for (int i = 0; i < BP32_MAX_GAMEPADS; i++) {
+      if (i != slot && controllers[i]) {
+        Serial.printf("Dropping stray controller in slot %d\n", i);
+        controllers[i]->disconnect();
+        controllers[i] = nullptr;
+      }
+    }
+    persistBonded(true);  // authoritative-connect rule, ECU-SPEC-001 §8
+    Serial.println("Bonded to this controller");
+    closePairingWindow("new controller bonded");
+  }
+  // Window closed => the guard above guarantees this is the bonded controller
+  // reconnecting; nothing to persist.
+  digitalWrite(PIN_MODE_LED, HIGH);
+}
 
-  char val[6];
-  snprintf(val, sizeof(val), "%d%%", (int)(m * 100));
-  display.setCursor(124 - (int)strlen(val) * 12, 23);
-  display.print(val);
-
-  display.drawRect(BX, BY, BW, BH, W);
-  if (st == 1) {                                    // ACC - anchored left
-    display.fillRect(BX + 2, BY + 2, (int)((BW - 4) * m), BH - 4, W);
-  } else if (st == 2) {                             // REV - anchored right
-    int w = (int)((BW - 4) * m);
-    display.fillRect(BX + BW - 2 - w, BY + 2, w, BH - 4, W);
-  } else {                                          // TURN - centre-out from the zero tick
-    int cx = BX + BW / 2;
-    display.drawFastVLine(cx, BY - 2, BH + 4, W);
-    int w = (int)((BW / 2 - 4) * m);
-    if (st == 3) display.fillRect(cx + 2, BY + 2, w, BH - 4, W);
-    else         display.fillRect(cx - 2 - w, BY + 2, w, BH - 4, W);
+void onDisconnectedController(ControllerPtr ctl) {
+  // A disconnect is not a reset - leave the bonded flag alone.
+  for (int i = 0; i < BP32_MAX_GAMEPADS; i++) {
+    if (controllers[i] == ctl) {
+      Serial.printf("Controller disconnected, slot %d\n", i);
+      controllers[i] = nullptr;
+      digitalWrite(PIN_MODE_LED, LOW);
+      break;
+    }
   }
 }
 
-// S0 Battery Critical - large empty battery + centred "!" (blink together),
-// with a single size-3 word "LOW" that stays lit. No strip, no BT glyph, no %.
-void renderBatteryCritical() {
-  if (animBlink()) {
-    display.drawRect(22, 3, 84, 26, W);           // large empty battery outline
-    display.fillRect(106, 11, 4, 10, W);          // terminal nub
-    display.fillRect(61, 7, 4, 13, W);            // "!" stem
-    display.fillRect(61, 23, 4, 4, W);            // "!" dot
-  }
-  display.setTextSize(3);
-  display.setCursor(37, 36);
-  display.print("LOW");                           // constant
+void dumpGamepad(ControllerPtr ctl) {
+  Serial.printf(
+    "axes: LX=%4d LY=%4d RX=%4d RY=%4d | brake=%4d throttle=%4d | "
+    "buttons=0x%04x dpad=0x%02x\n",
+    ctl->axisX(), ctl->axisY(), ctl->axisRX(), ctl->axisRY(),
+    ctl->brake(), ctl->throttle(),
+    ctl->buttons(), ctl->dpad()
+  );
 }
 
-void renderScreen() {
-  display.clearDisplay();
-  switch (screen) {
-    case 0: renderSearchLike("SCAN", BATT_NORMAL,  82); break;
-    case 1: renderSearchLike("SCAN", BATT_WARNING, 15); break;
-    case 2: renderSearchLike("PAIR",   BATT_NORMAL,  69); break;
-    case 3: renderSearchLike("PAIR",   BATT_WARNING, 15); break;
-    case 4: renderConnected();       break;
-    case 5: renderStickCheck();      break;
-    case 6: renderBatteryCritical(); break;
-  }
-  display.display();
-}
-
-void printLegend() {
-  Serial.println();
-  Serial.println("NitroWorks ECU - OLED pairing-screen mockup browser");
-  Serial.println("Press the GPIO15 button to step through:");
-  for (int i = 0; i < NUM_MOCKUPS; i++) {
-    Serial.print("  ");
-    Serial.println(MOCKUP_NAMES[i]);
-  }
-  Serial.println();
+// True while any control is off its neutral position: a stick/trigger past the
+// deadzone, or any button / d-pad pressed. Idle sticks (including the ~-4 LY/RY
+// zero offset) stay under the deadzone and read as inactive.
+bool inputActive(ControllerPtr ctl) {
+  if (ctl->buttons() || ctl->miscButtons() || ctl->dpad()) return true;
+  return abs(ctl->axisX())  > STICK_DEADZONE ||
+         abs(ctl->axisY())  > STICK_DEADZONE ||
+         abs(ctl->axisRX()) > STICK_DEADZONE ||
+         abs(ctl->axisRY()) > STICK_DEADZONE ||
+         abs(ctl->brake())    > STICK_DEADZONE ||
+         abs(ctl->throttle()) > STICK_DEADZONE;
 }
 
 void setup() {
+  pinMode(PIN_MODE_LED, OUTPUT);
+  digitalWrite(PIN_MODE_LED, LOW);
+  pinMode(PIN_COMMS_LED, OUTPUT);
+  digitalWrite(PIN_COMMS_LED, LOW);
+  initButton(pairBtn);
+  initButton(resetBtn);
+
   Serial.begin(115200);
-  initButton(navBtn);
 
-  Wire.begin();  // ESP32 default: SDA=21, SCL=22
-  if (!display.begin(OLED_ADDR, true)) {
-    Serial.println("SH1106 begin failed - check wiring / try address 0x3D");
-    while (true) {
-      delay(1000);
-    }
+  prefs.begin(NVS_NS, false);
+#ifdef NITRO_QA_RESET_NVS
+  prefs.clear();  // QA build only: return the unit to Unpaired on boot (ECU-SPEC-001 §8)
+  Serial.println("NITRO_QA_RESET_NVS: cleared stored bond");
+#endif
+  hasBondedController = prefs.getBool(NVS_KEY_BONDED, false);
+  Serial.printf("Boot: NVS bonded flag = %d\n", hasBondedController);
+
+  // Bring the BT stack up first so the ESP32 is connectable as early as
+  // possible after boot. A gamepad that was already on only retries its lost
+  // link for a short window; the sooner we are page-scanning, the more likely
+  // we catch that window and auto-reconnect without user action.
+  // NOTE: no unconditional BP32.forgetBluetoothKeys() here on purpose. A bonded
+  // unit must keep its key across a power cycle so the controller reconnects on
+  // its own. The key is cleared only inside openPairingWindow() - reached via the
+  // Pair or Reset button, or automatically below when the unit has no bond yet.
+  BP32.setup(&onConnectedController, &onDisconnectedController);
+  BP32.enableVirtualDevice(false);
+
+  Serial.println("Stage 2 smoke test: Bluepad32 pairing + Pair button");
+  if (hasBondedController) {
+    // Normal mode: reconnect to the bonded controller only, ignore everyone else.
+    // The Pair button opens pairing mode to accept a different controller.
+    BP32.enableNewBluetoothConnections(false);
+    Serial.println("Booted bonded - reconnecting to the stored controller. "
+                   "Press Pair to bond a different one.");
+  } else {
+    // No bond yet - go straight to pairing mode so the player doesn't have to
+    // press Pair on a fresh unit.
+    Serial.println("Booted Unpaired - entering pairing mode automatically.");
+    openPairingWindow();
   }
-  display.setTextColor(W);
-
-  printLegend();
-  Serial.printf("Showing mockup %s\n", MOCKUP_NAMES[screen]);
 }
 
 void loop() {
-  if (buttonPressed(navBtn)) {
-    screen = (screen + 1) % NUM_MOCKUPS;
-    Serial.printf("Showing mockup %s\n", MOCKUP_NAMES[screen]);
+  pollButtons();
+
+  bool dataUpdated = BP32.update();
+  if (dataUpdated) {
+    for (int i = 0; i < BP32_MAX_GAMEPADS; i++) {
+      ControllerPtr ctl = controllers[i];
+      if (ctl && ctl->isConnected() && ctl->hasData() && inputActive(ctl)) {
+        digitalWrite(PIN_COMMS_LED, HIGH);
+        commsBlinkOffAt = millis() + COMMS_BLINK_MS;
+        dumpGamepad(ctl);
+      }
+    }
   }
-  renderScreen();
-  delay(FRAME_MS);
+  if (commsBlinkOffAt != 0 && (int32_t)(millis() - commsBlinkOffAt) >= 0) {
+    digitalWrite(PIN_COMMS_LED, LOW);
+    commsBlinkOffAt = 0;
+  }
+
+  // LED status (PIN_MODE_LED), 3 states:
+  //   Connected    -> solid HIGH (set in the connect handler)
+  //   Pairing mode -> fast blink (125 ms)
+  //   Normal mode  -> slow blink (1000 ms), searching for the paired controller
+  if (pairingMode) {
+    digitalWrite(PIN_MODE_LED, (millis() / 125) % 2);
+  } else if (!anyControllerConnected()) {
+    digitalWrite(PIN_MODE_LED, (millis() / 1000) % 2);
+  }
+
+  delay(50);  // ~20 Hz print rate, readable in the monitor
 }
