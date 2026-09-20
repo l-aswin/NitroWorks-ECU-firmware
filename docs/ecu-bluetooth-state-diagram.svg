@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="680" height="360" viewBox="0 0 680 360" font-family="Segoe UI, Arial, sans-serif">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></marker></defs>
+<rect width="680" height="360" fill="#ffffff"/>
+<g stroke="#5F5E5A" stroke-width="1.5" fill="none">
+<line x1="36" y1="70" x2="66" y2="70" marker-end="url(#arrow)"/>
+<line x1="168" y1="70" x2="208" y2="70" marker-end="url(#arrow)"/>
+<path d="M118 105 L118 210 L208 210" marker-end="url(#arrow)"/>
+<path d="M450 70 L570 70 L570 108" marker-end="url(#arrow)"/>
+<path d="M450 210 L570 210 L570 172" marker-end="url(#arrow)"/>
+<line x1="330" y1="290" x2="330" y2="242" stroke-dasharray="4 3" marker-end="url(#arrow)"/>
+</g>
+<circle cx="28" cy="70" r="8" fill="#444441" stroke="#444441"/>
+<polygon points="118,35 168,70 118,105 68,70" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="1"/>
+<text x="118" y="75" font-size="14" font-weight="500" fill="#444441" text-anchor="middle">bonded?</text>
+<text x="188" y="60" font-size="12" fill="#5F5E5A" text-anchor="middle">true</text>
+<text x="128" y="150" font-size="12" fill="#5F5E5A">false</text>
+<rect x="210" y="40" width="240" height="60" rx="8" fill="#E1F5EE" stroke="#0F6E56"/>
+<text x="330" y="66" font-size="14" font-weight="500" fill="#085041" text-anchor="middle">Search state</text>
+<text x="330" y="84" font-size="12" fill="#0F6E56" text-anchor="middle">Bonded bluetooth gamepad only</text>
+<rect x="210" y="180" width="240" height="60" rx="8" fill="#E1F5EE" stroke="#0F6E56"/>
+<text x="330" y="206" font-size="14" font-weight="500" fill="#085041" text-anchor="middle">Pair state</text>
+<text x="330" y="224" font-size="12" fill="#0F6E56" text-anchor="middle">Accepts new bluetooth gamepad</text>
+<rect x="490" y="110" width="160" height="60" rx="8" fill="#EEEDFE" stroke="#534AB7"/>
+<text x="570" y="136" font-size="14" font-weight="500" fill="#3C3489" text-anchor="middle">Connected state</text>
+<text x="570" y="154" font-size="12" fill="#534AB7" text-anchor="middle">Read stick axes</text>
+<rect x="230" y="290" width="200" height="46" rx="8" fill="#F1EFE8" stroke="#5F5E5A" stroke-dasharray="4 3"/>
+<text x="330" y="310" font-size="14" font-weight="500" fill="#444441" text-anchor="middle">Pair button pressed</text>
+<text x="330" y="327" font-size="12" fill="#5F5E5A" text-anchor="middle">Any state: erase bond</text>
+</svg>

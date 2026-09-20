@@ -14,9 +14,11 @@
 ## Bluetooth gamepad pairing (`bt_task.cpp`)
 - Uses Bluepad32 to pair/bond with a single gamepad controller, persisting the bonded flag in NVS flash.
 - State machine: **Search** (reconnect known bonded pad) → **Pair** (accept a new pad, wipes old bond) → **Connected**.
-- Physical Pair and Reset buttons (debounced) trigger re-pairing or clearing the stored bond.
+- Physical Pair button (debounced) trigger re-pairing or clearing the stored bond.
 - Rejects unexpected/unbonded controller connections unless the pairing window is open.
 - Extracts throttle (left stick Y) and steer (right stick X) axes from the connected gamepad each poll cycle.
+
+![ECU Bluetooth gamepad state diagram](ecu-bluetooth-state-diagram.svg)
 
 ## Motor control (`motor_control.cpp`)
 - Skid-steer drive across 4 motors (FL/FR/RL/RR) via 2x L298N drivers, using PWM (`ledc`) for speed and digital pins for direction.
@@ -26,11 +28,10 @@
 
 ## OLED UI (`oled_ui.cpp`)
 - Renders different screens depending on link state: Scan/Search, Pair (with press-feedback blank frame), Connected (brief "READY" screen), then a live stick-check HUD (throttle/steer bar with ACC/REV/TURN labels).
-- Shows a "RESET..." toast animation after a bond reset.
 - Emits `RING`/`BUZZ` commands over UART1 whenever link state changes (e.g., connect chime).
 
 ## UART link to TCU (`uart_link.cpp`)
-- Sends command strings (`RING`, `BUZZ`) to the TCU over UART1 and logs any received TCU lines to serial. TCU degradation-ratio/heartbeat parsing is stubbed (TODO) — currently defaults assume full performance and link-up.
+- Sends command strings (`RING`, `BUZZ`) to the TCU over UART1 and logs any received TCU lines to serial. TCU(Telematics Control Unit) degradation-ratio/heartbeat parsing is stubbed (TODO) — currently defaults assume full performance and link-up.
 
 ## Config (`config.h`)
 - Centralizes all GPIO pin assignments (buttons, I2C, UART1, motor driver pins) and tunable timing/threshold constants (deadzones, PWM frequency/resolution, stale-input timeout, UI frame rate, NVS keys, etc).
