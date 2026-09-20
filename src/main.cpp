@@ -8,6 +8,7 @@
 //   button.h       - debounced button helper
 //   bt_task.h      - Bluepad32 pairing/bonding state machine (core 0)
 //   oled_ui.h      - OLED rendering + RING/BUZZ emit (core 1)
+//   motor_control.h - 4-motor PWM skid-steer drive (core 1)
 //   uart_link.h    - UART1 command emit/receive
 
 #include <Arduino.h>
@@ -15,6 +16,7 @@
 #include "bt_task.h"
 #include "config.h"
 #include "button.h"
+#include "motor_control.h"
 #include "oled_ui.h"
 #include "robot_state.h"
 
@@ -48,6 +50,7 @@ void setup() {
 
   xTaskCreatePinnedToCore(btTask, "bt", 8192, nullptr, 3, nullptr, 0);  // core 0
   xTaskCreatePinnedToCore(uiTask, "ui", 4096, nullptr, 1, nullptr, 1);  // core 1
+  xTaskCreatePinnedToCore(motorControlTask, "motor", 4096, nullptr, 5, &g_motorTaskHandle, 1);  // core 1
 }
 
 void loop() {

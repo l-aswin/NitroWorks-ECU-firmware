@@ -15,6 +15,16 @@ constexpr int PIN_I2C_SCL    = 22;
 constexpr int PIN_UART1_RX   = 16;   // UART1 <- TCU  (ECU-SPEC-001 §2)
 constexpr int PIN_UART1_TX   = 17;   // UART1 -> TCU  (RING / BUZZ commands)
 
+// Motor driver pins - 2x L298N (ECU-SPEC-001 §3). One motor per channel:
+// front ENA/IN1/IN2 -> front-left, front ENB/IN3/IN4 -> front-right,
+// rear ENA/IN1/IN2 -> rear-left, rear ENB/IN3/IN4 -> rear-right.
+constexpr int PIN_FL_EN  = 25, PIN_FR_EN  = 26;
+constexpr int PIN_FL_IN1 = 27, PIN_FL_IN2 = 14;
+constexpr int PIN_FR_IN1 = 32, PIN_FR_IN2 = 33;
+constexpr int PIN_RL_EN  = 18, PIN_RR_EN  = 19;
+constexpr int PIN_RL_IN1 = 23, PIN_RL_IN2 = 13;
+constexpr int PIN_RR_IN1 = 4,  PIN_RR_IN2 = 5;
+
 // ---- tunables --------------------------------------------------------------
 constexpr int32_t  AXIS_MAX        = 512;   // Bluepad32 stick full-scale
 constexpr int32_t  S4_DEADZONE     = 60;    // ~12 % of AXIS_MAX (ECU-SPEC-002 §7.6 - tune on hw)
@@ -28,6 +38,12 @@ constexpr uint32_t PAIR_BLANK_MS       = 600;  // header-only feedback frame aft
 constexpr uint32_t PAIR_SETUP_DEFER_MS = 200;  // hold the BT key-wipe until that feedback frame is flushed
 constexpr uint32_t BTN_DEBOUNCE_MS = 40;
 constexpr int      BATT_PCT_STUB   = 82;    // no real SoC on the ECU (BMS owns it) - placeholder only
+
+// Motor PWM (ECU-SPEC-001 §3/§4/§9 don't pin these down - firmware choice).
+constexpr int      MOTOR_PWM_FREQ_HZ  = 20000;  // inaudible
+constexpr int      MOTOR_PWM_RES_BITS = 8;      // 0-255 duty
+constexpr uint32_t MOTOR_STALE_MS     = 250;    // zero motors if no new gamepad data this long
+constexpr float    MOTOR_LIMP_RATIO   = 0.5f;   // used while tcuLinkUp == false
 
 // ---- NVS (which controller this car is bonded to - ECU-SPEC-001 §8) --------
 constexpr char NVS_NS[]         = "nitro-ecu";

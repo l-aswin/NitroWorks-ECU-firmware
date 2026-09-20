@@ -4,6 +4,7 @@
 
 #include "button.h"
 #include "config.h"
+#include "motor_control.h"
 #include "robot_state.h"
 
 // ---- Bluepad32 + pairing (core 0) ------------------------------------------
@@ -145,12 +146,14 @@ void onDisconnectedController(ControllerPtr ctl) {
 }
 
 // Reduce the whole gamepad to the two axes the S4 stick-check HUD cares about:
-// throttle = left stick vertical (up = forward, so negate axisY), steer = axisX.
+// throttle = left stick vertical (up = forward, so negate axisY),
+// steer = right stick horizontal (axisRX) - dual-stick control so curves can
+// be steered while moving, not just while stationary.
 void publishSticks() {
   int32_t thr = 0, str = 0;
   for (int i = 0; i < BP32_MAX_GAMEPADS; i++) {
     ControllerPtr ctl = controllers[i];
-    if (ctl && ctl->isConnected()) { thr = -ctl->axisY(); str = ctl->axisX(); break; }
+    if (ctl && ctl->isConnected()) { thr = -ctl->axisY(); str = ctl->axisRX(); break; }
   }
   g_pending.throttle = thr;
   g_pending.steer    = str;
@@ -187,8 +190,8 @@ void btTask(void*) {
     pollButtons();
 
     bool dataUpdated = BP32.update();
-    (void)dataUpdated;
     publishSticks();
+    if (dataUpdated) g_pending.inputAtMs = millis();   // motor_control stale-input basis (§6)
 
     // Deferred pairing-window setup (see openPairingWindow): run the BT-thread
     // key-wipe + discovery-enable only once the S2 feedback frame has had time
@@ -210,6 +213,7 @@ void btTask(void*) {
     // One critical-section struct copy for this whole iteration's changes -
     // see the RobotState comment above.
     publishState();
+    if (g_motorTaskHandle) xTaskNotifyGive(g_motorTaskHandle);  // wake motor_control on new data
 
     uint32_t now = millis();
     if (now - lastHeartbeat >= BT_HEARTBEAT_MS) {

@@ -22,6 +22,12 @@ struct RobotState {
   uint32_t  connectedAtMs  = 0;  // millis() of the last 0->1 connect edge
   uint32_t  resetToastAtMs = 0;  // millis() of the last Reset press (0 = none)
   uint32_t  pairBlankAtMs  = 0;  // millis() of the last Pair press (0 = none) - drives the S2 feedback frame
+
+  uint32_t  inputAtMs        = 0;     // millis() of the last new BP32 data (motor_control stale-input cutoff)
+  // TODO(uart_tcu): these two are stubbed at full-performance defaults until
+  // UART1 parsing of the TCU's degradation ratio / heartbeat exists.
+  float     degradationRatio = 1.0f;  // 0.0-1.0, caps motor speed (ECU-SPEC-001 §6)
+  bool      tcuLinkUp        = true;  // false -> motor_control uses MOTOR_LIMP_RATIO instead
 };
 
 extern RobotState   g_state;      // the shared copy - touch only under g_stateMux
